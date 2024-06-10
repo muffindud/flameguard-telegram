@@ -3,7 +3,26 @@ import os
 from telegram import Update, Bot
 from telegram.ext import CommandHandler, MessageHandler, Application, filters, ContextTypes
 import asyncio
+from threading import Thread
+from requests import get
+from pika import BlockingConnection, ConnectionParameters
+from functools import wraps
 
+exchange = "telegram"
+receive_from = "send"
+
+connection = BlockingConnection(ConnectionParameters('localhost'))
+channel = connection.channel()
+channel.exchange_declare(exchange=exchange, exchange_type='direct')
+result = channel.queue_declare(queue='', exclusive=True)
+queue_name = result.method.queue
+channel.queue_bind(exchange=exchange, queue=queue_name, routing_key=receive_from)
+
+def sync(func: callable):
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        return asyncio.get_event_loop().run_until_complete(func(*args, **kwargs))
+    return wrapper
 
 load_dotenv()
 Token = os.getenv('TELEGRAM_TOKEN')
@@ -110,7 +129,7 @@ async def stop_bot_on_command(app):
 
 
 async def main():
-    fire = True
+    fire = False
     if fire == True:
         IMAGE_FILENAME = 'fire.png'
         image_path = os.path.join(IMAGE_DIRECTORY, IMAGE_FILENAME)
@@ -135,9 +154,20 @@ async def main():
     return app
 
 
+@sync
+async def callback(ch, method, properties, body):
+    print(f"Received: {body.decode()}")
+    img_link, message = body.decode().split(' ', 1)
+    with open(os.path.join(IMAGE_DIRECTORY, 'fire.png'), 'wb') as image_file:
+        image_file.write(get(img_link).content)
+    await broadcast_image(bot, os.path.join(IMAGE_DIRECTORY, 'fire.png'), message)
+
 if __name__ == '__main__':
+    channel.basic_consume(queue=queue_name, on_message_callback=callback, auto_ack=True)
+
     loop = asyncio.get_event_loop()
     app = loop.run_until_complete(main())
+    channel.start_consuming()
 
     try:
         loop.run_until_complete(asyncio.gather(
